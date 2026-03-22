@@ -77,7 +77,7 @@ let
 
   # --- Import modules ---
   targetProfiles = import ./lib/target-profiles.nix { inherit lib; };
-  validate = import ./lib/validate.nix;
+  validate = import ./lib/validate.nix { inherit lib; };
   control = import ./lib/control.nix { inherit lib; };
   wrapper = import ./lib/wrapper.nix { inherit lib; };
   gtkHelpers = import ./lib/gtk.nix { inherit lib pkgs; };
@@ -116,7 +116,7 @@ let
 
   # --- Pre-render wrapper script ---
   wrapperScript = wrapper.renderWrapperScript {
-    inherit binName bundlePath gtkSupport pname extraWrapperEnv typelibPackages;
+    inherit binName bundlePath gtkSupport pname extraWrapperEnv;
   };
 
   # --- Pre-render maintainer scripts ---
@@ -126,7 +126,7 @@ let
 
   # --- Shell helpers ---
   shellFunctions = shellHelpers.mkShellHelpers {
-    inherit pname binName package bundlePath excludeLibs extraLibs
+    inherit pname binName package realBinary bundlePath excludeLibs extraLibs
             extraLibPackages createCompatSymlinks allowedSystemLibs;
     systemLibDir = resolvedSystemLibDir;
     interpreter = resolvedInterpreter;
@@ -142,9 +142,7 @@ let
   };
 
   verifyCode = shellHelpers.mkVerifyCode {
-    inherit pname bundlePath;
-    systemLibDir = resolvedSystemLibDir;
-    inherit allowedSystemLibs;
+    inherit pname bundlePath allowedSystemLibs;
   };
 
   manifestCode = shellHelpers.mkManifestCode {

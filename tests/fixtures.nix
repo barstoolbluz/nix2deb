@@ -4,8 +4,6 @@
 { pkgs }:
 
 let
-  lib = pkgs.lib;
-
   # A simple ELF binary that links libz, with a .test-simple-wrapped variant
   simpleElf = pkgs.runCommandCC "simple-elf" {
     buildInputs = [ pkgs.zlib ];

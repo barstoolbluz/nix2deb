@@ -2,6 +2,7 @@
 #
 # All checks run during evaluation — instant feedback, no build wait.
 # Follows Debian Policy Manual where applicable.
+{ lib }:
 
 {
   # Debian policy 5.6.1: lowercase alphanumerics, '+', '-', '.'
@@ -28,8 +29,8 @@
     let
       check =
         name: value:
-        if builtins.match ".*\n.*" value != null then
-          throw "nix-to-deb: field '${name}' must not contain newlines. Got: ${value}"
+        if builtins.length (lib.splitString "\n" value) > 1 then
+          throw "nix-to-deb: field '${name}' must not contain newlines."
         else
           true;
     in

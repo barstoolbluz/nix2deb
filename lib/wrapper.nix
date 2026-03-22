@@ -12,7 +12,6 @@
       gtkSupport ? false,
       pname ? binName,
       extraWrapperEnv ? [ ],
-      typelibPackages ? [ ],
     }:
     let
       gtkEnv = lib.optionals gtkSupport [
