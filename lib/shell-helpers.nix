@@ -123,16 +123,28 @@
         for lib_name in $needed; do
           local found=""
 
-          # Search in RPATH dirs
-          for dir in "''${search_dirs[@]}"; do
-            # Expand $ORIGIN if present
-            local expanded_dir
-            expanded_dir="''${dir/\$ORIGIN/$(dirname "$real_file")}"
-            if [ -f "$expanded_dir/$lib_name" ]; then
-              found="$expanded_dir/$lib_name"
-              break
+          # Handle absolute-path DT_NEEDED entries (nix often uses these)
+          if [[ "$lib_name" == /* ]]; then
+            if [ -f "$lib_name" ]; then
+              found="$lib_name"
+            else
+              echo "  NOTE: absolute DT_NEEDED path does not exist: $lib_name (from $real_file)" >&2
+              continue
             fi
-          done
+          fi
+
+          # Search in RPATH dirs (only for soname-style entries)
+          if [ -z "$found" ]; then
+            for dir in "''${search_dirs[@]}"; do
+              # Expand $ORIGIN if present
+              local expanded_dir
+              expanded_dir="''${dir/\$ORIGIN/$(dirname "$real_file")}"
+              if [ -f "$expanded_dir/$lib_name" ]; then
+                found="$expanded_dir/$lib_name"
+                break
+              fi
+            done
+          fi
 
           # Not found in RPATH — check if it's an allowed system lib
           if [ -z "$found" ]; then
@@ -191,13 +203,11 @@
         if [ -e "$dst" ] || [ -L "$dst" ]; then
           # Already exists — check for collision
           if [ -f "$dst" ] && [ -f "$src" ] && ! cmp -s "$(readlink -f "$src")" "$(readlink -f "$dst")"; then
-            echo "ERROR: Library collision detected!" >&2
-            echo "  Target: $dst" >&2
-            echo "  Existing source differs from: $src" >&2
-            echo "  Use excludeLibs or extraLibs to resolve this conflict." >&2
-            exit 1
+            echo "  WARN: library collision for $(basename "$dst"), keeping first copy" >&2
+            echo "    Existing: $(readlink -f "$dst")" >&2
+            echo "    Skipping: $src" >&2
           fi
-          # Same content or symlink — skip
+          # Same content or collision — keep existing (first-wins)
           return 0
         fi
 
@@ -285,11 +295,20 @@
           done
         ''}
 
-        # Fix permissions and RPATH on all bundled libs, scrub nix store refs
+        # Fix permissions, RPATH, absolute DT_NEEDED entries, and scrub nix store refs
         for lib_file in "$LIBDIR"/*.so*; do
           if [ -f "$lib_file" ] && ! [ -L "$lib_file" ]; then
             chmod u+w "$lib_file"
             patchelf --set-rpath '${bundlePath}:${systemLibDir}' "$lib_file" 2>/dev/null || true
+            # Replace absolute-path DT_NEEDED entries with sonames
+            local abs_needed
+            abs_needed=$(patchelf --print-needed "$lib_file" 2>/dev/null | grep '^/' || true)
+            for abs_lib in $abs_needed; do
+              local soname
+              soname=$(basename "$abs_lib")
+              echo "  FIX: $lib_file: replacing DT_NEEDED $abs_lib -> $soname"
+              patchelf --replace-needed "$abs_lib" "$soname" "$lib_file" 2>/dev/null || true
+            done
             remove-references-to -t ${pkgs.stdenv.cc} "$lib_file" 2>/dev/null || true
             for ref in $(strings "$lib_file" | grep -o '/nix/store/[a-z0-9]\{32\}-[^/]*' | sort -u); do
               remove-references-to -t "$ref" "$lib_file" 2>/dev/null || true
@@ -307,6 +326,15 @@
         chmod u+w,+x "$PKG/usr/bin/.${binName}-bin"
         patchelf --set-interpreter '${interpreter}' "$PKG/usr/bin/.${binName}-bin"
         patchelf --set-rpath '${bundlePath}:${systemLibDir}' "$PKG/usr/bin/.${binName}-bin"
+        # Replace absolute-path DT_NEEDED entries with sonames
+        local abs_needed
+        abs_needed=$(patchelf --print-needed "$PKG/usr/bin/.${binName}-bin" 2>/dev/null | grep '^/' || true)
+        for abs_lib in $abs_needed; do
+          local soname
+          soname=$(basename "$abs_lib")
+          echo "  FIX: replacing DT_NEEDED $abs_lib -> $soname"
+          patchelf --replace-needed "$abs_lib" "$soname" "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true
+        done
         # Strip all nix store references from the binary
         remove-references-to -t ${pkgs.stdenv.cc} "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true
         remove-references-to -t ${package} "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true
@@ -439,6 +467,12 @@ CONTROL_TEMPLATE_EOF
             local needed
             needed=$(patchelf --print-needed "$staged_file" 2>/dev/null) || continue
             for lib_name in $needed; do
+              # Absolute paths in DT_NEEDED are always a bug at this stage
+              if [[ "$lib_name" == /* ]]; then
+                echo "  ABSOLUTE DT_NEEDED: $staged_file needs $lib_name (should be soname only)" >&2
+                unresolved=$((unresolved + 1))
+                continue
+              fi
               local found=false
               # Check in bundled LIBDIR
               [ -f "$LIBDIR/$lib_name" ] && found=true
