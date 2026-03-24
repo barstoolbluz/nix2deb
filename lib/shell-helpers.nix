@@ -45,8 +45,7 @@
       ],
     }:
     let
-      excludePattern =
-        if excludeLibs == [ ] then "" else builtins.concatStringsSep "\\|" excludeLibs;
+      excludePattern = if excludeLibs == [ ] then "" else builtins.concatStringsSep "\\|" excludeLibs;
 
       hasExcludes = excludeLibs != [ ];
     in
@@ -65,24 +64,29 @@
       # Otherwise checks .${binName}-wrapped first, then ${binName}.
       # Fails early if the binary doesn't exist.
       resolve_binary() {
-        ${if realBinary != null then ''
-        if [ -f "${realBinary}" ]; then
-          RESOLVED_BINARY="${realBinary}"
-        else
-          echo "ERROR: specified realBinary '${realBinary}' does not exist" >&2
-          exit 1
-        fi
-        '' else ''
-        if [ -f "${package}/bin/.${binName}-wrapped" ]; then
-          RESOLVED_BINARY="${package}/bin/.${binName}-wrapped"
-        elif [ -f "${package}/bin/${binName}" ]; then
-          RESOLVED_BINARY="${package}/bin/${binName}"
-        else
-          echo "ERROR: could not find binary '${binName}' in ${package}/bin/" >&2
-          echo "  Tried: .${binName}-wrapped, ${binName}" >&2
-          exit 1
-        fi
-        ''}
+        ${
+          if realBinary != null then
+            ''
+              if [ -f "${realBinary}" ]; then
+                RESOLVED_BINARY="${realBinary}"
+              else
+                echo "ERROR: specified realBinary '${realBinary}' does not exist" >&2
+                exit 1
+              fi
+            ''
+          else
+            ''
+              if [ -f "${package}/bin/.${binName}-wrapped" ]; then
+                RESOLVED_BINARY="${package}/bin/.${binName}-wrapped"
+              elif [ -f "${package}/bin/${binName}" ]; then
+                RESOLVED_BINARY="${package}/bin/${binName}"
+              else
+                echo "ERROR: could not find binary '${binName}' in ${package}/bin/" >&2
+                echo "  Tried: .${binName}-wrapped, ${binName}" >&2
+                exit 1
+              fi
+            ''
+        }
         echo "==> Resolved binary: $RESOLVED_BINARY"
       }
 
@@ -231,6 +235,29 @@
         fi
       }
 
+      # --- scrub_elf_nix_refs ---
+      # Recursively fix RPATH, replace absolute DT_NEEDED entries, and
+      # remove all /nix/store references from .so files under a directory.
+      scrub_elf_nix_refs() {
+        local target_dir="$1"
+        while IFS= read -r -d "" lib_file; do
+          chmod u+w "$lib_file"
+          patchelf --set-rpath '${bundlePath}:${systemLibDir}' "$lib_file" 2>/dev/null || true
+          local abs_needed
+          abs_needed=$(patchelf --print-needed "$lib_file" 2>/dev/null | grep '^/' || true)
+          for abs_lib in $abs_needed; do
+            local soname
+            soname=$(basename "$abs_lib")
+            echo "  FIX: $lib_file: replacing DT_NEEDED $abs_lib -> $soname"
+            patchelf --replace-needed "$abs_lib" "$soname" "$lib_file" 2>/dev/null || true
+          done
+          remove-references-to -t ${pkgs.stdenv.cc} "$lib_file" 2>/dev/null || true
+          for ref in $(strings "$lib_file" | grep -o '/nix/store/[a-z0-9]\{32\}-[^/]*' | sort -u); do
+            remove-references-to -t "$ref" "$lib_file" 2>/dev/null || true
+          done
+        done < <(find "$target_dir" -name '*.so*' -type f ! -type l -print0)
+      }
+
       # --- copy_private_libs (#7, #8) ---
       # Copies closure libs into $LIBDIR.
       # - Collision detection: fails if same basename with different content (#7)
@@ -243,46 +270,52 @@
         copy_closure_libs
 
         # Collect from extra lib packages
-        ${builtins.concatStringsSep "\n" (map (pkg: ''
-          for so in "${pkg}"/lib/*.so*; do
-            if [ -f "$so" ] && ! [ -L "$so" ]; then
-              collect_elf_closure "$so"
-              copy_closure_libs
-            fi
-          done
-        '') extraLibPackages)}
+        ${builtins.concatStringsSep "\n" (
+          map (pkg: ''
+            for so in "${pkg}"/lib/*.so*; do
+              if [ -f "$so" ] && ! [ -L "$so" ]; then
+                collect_elf_closure "$so"
+                copy_closure_libs
+              fi
+            done
+          '') extraLibPackages
+        )}
 
         # Copy extra lib files directly
-        ${builtins.concatStringsSep "\n" (map (extraLib: ''
-          if [ -f "${extraLib}" ]; then
-            local target
-            target=$(basename "${extraLib}")
-            _copy_lib_safe "${extraLib}" "$LIBDIR/$target"
-          elif [ -L "${extraLib}" ]; then
-            local linkto target
-            linkto=$(basename "$(readlink "${extraLib}")")
-            target=$(basename "${extraLib}")
-            [ "$linkto" != "$target" ] && [ ! -e "$LIBDIR/$target" ] && \
-              ln -sf "$linkto" "$LIBDIR/$target"
-          fi
-        '') extraLibs)}
-
-        # Copy .so files and symlinks from extra packages
-        ${builtins.concatStringsSep "\n" (map (pkg: ''
-          for so in "${pkg}"/lib/*.so*; do
-            if [ -f "$so" ] && ! [ -L "$so" ]; then
+        ${builtins.concatStringsSep "\n" (
+          map (extraLib: ''
+            if [ -f "${extraLib}" ]; then
               local target
-              target=$(basename "$so")
-              _copy_lib_safe "$so" "$LIBDIR/$target"
-            elif [ -L "$so" ]; then
+              target=$(basename "${extraLib}")
+              _copy_lib_safe "${extraLib}" "$LIBDIR/$target"
+            elif [ -L "${extraLib}" ]; then
               local linkto target
-              linkto=$(basename "$(readlink "$so")")
-              target=$(basename "$so")
+              linkto=$(basename "$(readlink "${extraLib}")")
+              target=$(basename "${extraLib}")
               [ "$linkto" != "$target" ] && [ ! -e "$LIBDIR/$target" ] && \
                 ln -sf "$linkto" "$LIBDIR/$target"
             fi
-          done
-        '') extraLibPackages)}
+          '') extraLibs
+        )}
+
+        # Copy .so files and symlinks from extra packages
+        ${builtins.concatStringsSep "\n" (
+          map (pkg: ''
+            for so in "${pkg}"/lib/*.so*; do
+              if [ -f "$so" ] && ! [ -L "$so" ]; then
+                local target
+                target=$(basename "$so")
+                _copy_lib_safe "$so" "$LIBDIR/$target"
+              elif [ -L "$so" ]; then
+                local linkto target
+                linkto=$(basename "$(readlink "$so")")
+                target=$(basename "$so")
+                [ "$linkto" != "$target" ] && [ ! -e "$LIBDIR/$target" ] && \
+                  ln -sf "$linkto" "$LIBDIR/$target"
+              fi
+            done
+          '') extraLibPackages
+        )}
 
         ${lib.optionalString createCompatSymlinks ''
           # Create soname compat symlinks (opt-in)
@@ -296,25 +329,7 @@
         ''}
 
         # Fix permissions, RPATH, absolute DT_NEEDED entries, and scrub nix store refs
-        for lib_file in "$LIBDIR"/*.so*; do
-          if [ -f "$lib_file" ] && ! [ -L "$lib_file" ]; then
-            chmod u+w "$lib_file"
-            patchelf --set-rpath '${bundlePath}:${systemLibDir}' "$lib_file" 2>/dev/null || true
-            # Replace absolute-path DT_NEEDED entries with sonames
-            local abs_needed
-            abs_needed=$(patchelf --print-needed "$lib_file" 2>/dev/null | grep '^/' || true)
-            for abs_lib in $abs_needed; do
-              local soname
-              soname=$(basename "$abs_lib")
-              echo "  FIX: $lib_file: replacing DT_NEEDED $abs_lib -> $soname"
-              patchelf --replace-needed "$abs_lib" "$soname" "$lib_file" 2>/dev/null || true
-            done
-            remove-references-to -t ${pkgs.stdenv.cc} "$lib_file" 2>/dev/null || true
-            for ref in $(strings "$lib_file" | grep -o '/nix/store/[a-z0-9]\{32\}-[^/]*' | sort -u); do
-              remove-references-to -t "$ref" "$lib_file" 2>/dev/null || true
-            done
-          fi
-        done
+        scrub_elf_nix_refs "$LIBDIR"
 
         echo "==> Library bundling complete."
       }
@@ -351,16 +366,16 @@
   mkControlInstallCode =
     { controlFileTemplate }:
     ''
-      install_control_file() {
-        echo "==> Writing DEBIAN control files..."
-        local installed_size
-        installed_size=$(du -sk "$PKG" | awk '{print $1}')
-        cat > "$PKG/DEBIAN/control" <<'CONTROL_TEMPLATE_EOF'
-${controlFileTemplate}
-CONTROL_TEMPLATE_EOF
-        sed -i "s/@@INSTALLED_SIZE@@/$installed_size/" "$PKG/DEBIAN/control"
-        echo "==> Control file written."
-      }
+            install_control_file() {
+              echo "==> Writing DEBIAN control files..."
+              local installed_size
+              installed_size=$(du -sk "$PKG/usr" | awk '{print $1}')
+              cat > "$PKG/DEBIAN/control" <<'CONTROL_TEMPLATE_EOF'
+      ${controlFileTemplate}
+      CONTROL_TEMPLATE_EOF
+              sed -i "s/@@INSTALLED_SIZE@@/$installed_size/" "$PKG/DEBIAN/control"
+              echo "==> Control file written."
+            }
     '';
 
   # Generate the share-copying and fixup code
@@ -377,43 +392,57 @@ CONTROL_TEMPLATE_EOF
     ''
       copy_share_tree() {
         echo "==> Copying share files..."
-        ${builtins.concatStringsSep "\n" (map (dir: ''
-          if [ -d "${package}/share/${dir}" ]; then
-            mkdir -p "$SHAREDIR/${dir}"
-            cp -rL "${package}/share/${dir}/." "$SHAREDIR/${dir}/"
-            chmod -R u+w "$SHAREDIR/${dir}"
-          fi
-        '') shareFiles)}
+        ${builtins.concatStringsSep "\n" (
+          map (dir: ''
+            if [ -d "${package}/share/${dir}" ]; then
+              mkdir -p "$SHAREDIR/${dir}"
+              cp -rL "${package}/share/${dir}/." "$SHAREDIR/${dir}/"
+              chmod -R u+w "$SHAREDIR/${dir}"
+            fi
+          '') shareFiles
+        )}
 
         # Extra share copies
-        ${builtins.concatStringsSep "\n" (map (copy: ''
-          if [ -e "${copy.src}" ]; then
-            mkdir -p "$SHAREDIR/${copy.dst}"
-            cp -rL "${copy.src}/." "$SHAREDIR/${copy.dst}/"
-            chmod -R u+w "$SHAREDIR/${copy.dst}"
-          fi
-        '') extraShareCopies)}
+        ${builtins.concatStringsSep "\n" (
+          map (copy: ''
+            if [ -e "${copy.src}" ]; then
+              mkdir -p "$SHAREDIR/${copy.dst}"
+              cp -rL "${copy.src}/." "$SHAREDIR/${copy.dst}/"
+              chmod -R u+w "$SHAREDIR/${copy.dst}"
+            fi
+          '') extraShareCopies
+        )}
 
         # Fix nix store paths in data files
         ${lib.optionalString fixDesktopFiles ''
           for f in "$SHAREDIR"/applications/*.desktop; do
-            [ -f "$f" ] && sed -i 's|/nix/store/[^/]*/bin/${binName}|/usr/bin/${binName}|g' "$f"
+            [ -f "$f" ] || continue
+            sed -i 's|/nix/store/[^/]*/bin/|/usr/bin/|g' "$f"
+            sed -i 's|/nix/store/[^/]*/share/|/usr/share/|g' "$f"
           done
         ''}
         ${lib.optionalString fixDbusServices ''
           for f in "$SHAREDIR"/dbus-1/services/*.service; do
-            [ -f "$f" ] && sed -i 's|/nix/store/[^/]*/bin/${binName}|/usr/bin/${binName}|g' "$f"
+            [ -f "$f" ] || continue
+            sed -i 's|/nix/store/[^/]*/bin/|/usr/bin/|g' "$f"
+            sed -i 's|/nix/store/[^/]*/share/|/usr/share/|g' "$f"
           done
         ''}
         ${lib.optionalString fixSystemdServices ''
           for f in "$SHAREDIR"/systemd/user/*.service; do
-            [ -f "$f" ] && sed -i 's|/nix/store/[^/]*|/usr|g' "$f"
+            [ -f "$f" ] || continue
+            sed -i 's|/nix/store/[^/]*/bin/|/usr/bin/|g' "$f"
+            sed -i 's|/nix/store/[^/]*/lib/|/usr/lib/|g' "$f"
+            sed -i 's|/nix/store/[^/]*/share/|/usr/share/|g' "$f"
           done
         ''}
 
         # Strip remaining nix store references from data files
-        find "$SHAREDIR" -type f \( -name "*.desktop" -o -name "*.service" -o -name "*.xml" \) \
-          -exec remove-references-to -t ${pkgs.stdenv.cc} '{}' + 2>/dev/null || true
+        find "$SHAREDIR" -type f \( -name "*.desktop" -o -name "*.service" -o -name "*.xml" \) -print0 2>/dev/null | \
+          while IFS= read -r -d "" data_file; do
+            remove-references-to -t ${pkgs.stdenv.cc} "$data_file" 2>/dev/null || true
+            remove-references-to -t ${package} "$data_file" 2>/dev/null || true
+          done || true
 
         echo "==> Share files copied."
       }
@@ -478,7 +507,9 @@ CONTROL_TEMPLATE_EOF
               [ -f "$LIBDIR/$lib_name" ] && found=true
               # Check system lib dir
               [ "$found" = false ] && {
-                for allowed in ${builtins.concatStringsSep " " (map (l: ''"${l}"'') allowedSystemLibs)}; do
+                for allowed in ${
+                  builtins.concatStringsSep " " (map (l: ''"${l}"'') allowedSystemLibs)
+                }; do
                   case "$lib_name" in
                     "$allowed"*) found=true; break ;;
                   esac
@@ -512,7 +543,11 @@ CONTROL_TEMPLATE_EOF
 
   # --- write_build_manifest ---
   mkManifestCode =
-    { pname, version, debArch }:
+    {
+      pname,
+      version,
+      debArch,
+    }:
     ''
       write_build_manifest() {
         echo "==> Writing build manifest..."

@@ -38,9 +38,10 @@ sudo dpkg -i result/ripgrep_*_amd64.deb
 
 ## How It Works
 
-1. **Bundle libraries** — Collects all shared library dependencies via `ldd`,
-   copies them to `/usr/lib/<pname>/`, excluding glibc (which must come from
-   the host for GPU driver compatibility).
+1. **Bundle libraries** — Walks the ELF dependency closure via
+   `patchelf --print-needed` / `--print-rpath`, copies resolved libraries to
+   `/usr/lib/<pname>/`, excluding glibc (which must come from the host for GPU
+   driver compatibility).
 
 2. **Patch the binary** — `patchelf` sets the system dynamic linker and a
    `RUNPATH` that searches bundled libs first, then system libs:
@@ -172,6 +173,6 @@ that nix's newer glibc has removed.
   `systemLibDir` for other architectures
 - **~40MB overhead** — bundling ~250 shared libraries adds size
 - **glibc floor** — host must have glibc >= what the nix-built libs require
-- **dlopen'd modules need manual discovery** — `ldd` doesn't see GIO modules,
-  pixbuf loaders, Qt plugins, etc. Use `gtkSupport` for GTK apps or
-  `extraLibPackages` for others
+- **dlopen'd modules need manual discovery** — static ELF dependency walking
+  doesn't see GIO modules, pixbuf loaders, Qt plugins, etc. Use `gtkSupport`
+  for GTK apps or `extraLibPackages` for others

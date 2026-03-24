@@ -27,13 +27,10 @@
 
         # --- GIO modules (dconf) ---
         mkdir -p "$LIBDIR/gio/modules"
-        # Collect deps from original nix store path BEFORE patchelf changes RPATH
+        # Collect deps from the original nix store path (not the staged copy)
         collect_elf_closure "${dconfLib}/lib/gio/modules/libdconfsettings.so"
         copy_closure_libs
         cp "${dconfLib}/lib/gio/modules/libdconfsettings.so" "$LIBDIR/gio/modules/"
-        chmod u+w "$LIBDIR/gio/modules/libdconfsettings.so"
-        patchelf --set-rpath '${bundlePath}:${systemLibDir}' \
-          "$LIBDIR/gio/modules/libdconfsettings.so" 2>/dev/null || true
 
         # --- GDK pixbuf loaders (dynamic discovery) ---
         local pixbuf_src_dir
@@ -55,7 +52,7 @@
             done
           fi
 
-          # Collect deps from ORIGINAL nix store paths before patchelf changes RPATH
+          # Collect deps from original nix store paths (not the staged copies)
           for loader in "$pixbuf_src_dir"/loaders/*.so; do
             [ -f "$loader" ] || continue
             collect_elf_closure "$loader"
@@ -68,13 +65,6 @@
               copy_closure_libs
             done
           fi
-
-          # Fix permissions and RPATH on staged loaders
-          for loader in "$LIBDIR"/gdk-pixbuf-2.0/loaders/*.so; do
-            [ -f "$loader" ] || continue
-            chmod u+w "$loader"
-            patchelf --set-rpath '${bundlePath}:${systemLibDir}' "$loader" 2>/dev/null || true
-          done
 
           # Generate loaders.cache via gdk-pixbuf-query-loaders
           GDK_PIXBUF_MODULEDIR="$LIBDIR/gdk-pixbuf-2.0/loaders" \
@@ -102,7 +92,9 @@
           "$SHAREDIR/${pname}-schemas/glib-2.0/schemas/" 2>/dev/null || true
         # Strip nix store paths from schema XML before compiling
         find "$SHAREDIR/${pname}-schemas" -name '*.xml' -exec \
-          sed -i 's|/nix/store/[^<]*|/usr/share/backgrounds/gnome/placeholder|g' '{}' + 2>/dev/null || true
+          sed -i 's|/nix/store/[^<]*/share/|/usr/share/|g' '{}' + 2>/dev/null || true
+        find "$SHAREDIR/${pname}-schemas" -name '*.xml' -exec \
+          sed -i 's|/nix/store/[^<]*/|/usr/|g' '{}' + 2>/dev/null || true
         # GTK schema support is best-effort for common patterns.
         # Let compilation fail loudly so broken schemas are caught at build time.
         echo "==> Compiling GSettings schemas..."
@@ -110,14 +102,20 @@
           "$SHAREDIR/${pname}-schemas/glib-2.0/schemas/"
 
         # --- GObject introspection typelibs ---
-        ${lib.optionalString (typelibPackages != []) ''
+        ${lib.optionalString (typelibPackages != [ ]) ''
           mkdir -p "$LIBDIR/girepository-1.0"
-          ${builtins.concatStringsSep "\n" (map (pkg: ''
-            if [ -d "${pkg}/lib/girepository-1.0" ]; then
-              cp "${pkg}/lib/girepository-1.0"/*.typelib "$LIBDIR/girepository-1.0/" 2>/dev/null || true
-            fi
-          '') typelibPackages)}
+          ${builtins.concatStringsSep "\n" (
+            map (pkg: ''
+              if [ -d "${pkg}/lib/girepository-1.0" ]; then
+                cp "${pkg}/lib/girepository-1.0"/*.typelib "$LIBDIR/girepository-1.0/" 2>/dev/null || true
+              fi
+            '') typelibPackages
+          )}
         ''}
+
+        # Scrub nix store refs from all ELF files added during GTK setup
+        # (gio modules, pixbuf loaders, and their closure deps)
+        scrub_elf_nix_refs "$LIBDIR"
 
         echo "==> GTK runtime assets staged."
       }
