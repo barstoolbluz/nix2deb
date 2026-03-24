@@ -1,4 +1,4 @@
-# nix-to-deb
+# nix2deb
 
 Package nix-built applications as self-contained `.deb` files for
 Debian/Ubuntu. Bundles all library dependencies from nix while using the
@@ -12,13 +12,13 @@ Add as a flake input:
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    nix-to-deb.url = "github:youruser/nix-to-deb";
+    nix2deb.url = "github:youruser/nix2deb";
   };
 
-  outputs = { nixpkgs, nix-to-deb, ... }:
+  outputs = { nixpkgs, nix2deb, ... }:
     let
       pkgs = import nixpkgs { system = "x86_64-linux"; };
-      nixToDeb = nix-to-deb.lib.nixToDeb;
+      nixToDeb = nix2deb.lib.nixToDeb;
     in {
       packages.x86_64-linux.default = nixToDeb {
         inherit pkgs;
