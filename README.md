@@ -115,7 +115,7 @@ to be discovered. When both `discoverModules` and `gtkSupport` are enabled,
 Use `discoverModuleCategories` to whitelist specific categories:
 
 ```nix
-discoverModuleCategories = [ "qt" "gstreamer" ];  # only discover Qt and GStreamer
+discoverModuleCategories = [ "qt6" "gstreamer" ];  # only discover Qt 6 and GStreamer
 ```
 
 ## Full API Reference
@@ -153,7 +153,7 @@ discoverModuleCategories = [ "qt" "gstreamer" ];  # only discover Qt and GStream
 | `extraLibs` | `[]` | Additional `.so` files to bundle |
 | `extraLibPackages` | `[]` | Packages whose `.so` files and deps to bundle |
 | `discoverModules` | `false` | Auto-discover `dlopen()`'d modules from ELF closure |
-| `discoverModuleCategories` | `null` | Whitelist categories (`null` = all, or `[ "gio" "qt" "gstreamer" ... ]`) |
+| `discoverModuleCategories` | `null` | Whitelist categories (`null` = all, or `[ "gio" "pixbuf" "qt5" "qt6" "gstreamer" "typelibs" "schemas" ]`) |
 
 ### GTK Support
 
