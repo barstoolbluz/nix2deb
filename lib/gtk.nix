@@ -39,30 +39,24 @@
           echo "WARNING: Could not find pixbuf loader version dir" >&2
         else
           mkdir -p "$LIBDIR/gdk-pixbuf-2.0/loaders"
-          for loader in "$pixbuf_src_dir"/loaders/*.so; do
-            [ -f "$loader" ] && cp "$loader" "$LIBDIR/gdk-pixbuf-2.0/loaders/"
-          done
 
           # SVG loader from librsvg
           local rsvg_pixbuf_dir
           rsvg_pixbuf_dir=$(find "${librsvg}/lib/gdk-pixbuf-2.0" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -n1)
-          if [ -n "$rsvg_pixbuf_dir" ] && [ -d "$rsvg_pixbuf_dir/loaders" ]; then
-            for loader in "$rsvg_pixbuf_dir"/loaders/*.so; do
-              [ -f "$loader" ] && cp "$loader" "$LIBDIR/gdk-pixbuf-2.0/loaders/"
-            done
-          fi
 
-          # Collect deps from original nix store paths (not the staged copies)
+          # Collect deps from original nix store paths first, then copy loaders
           for loader in "$pixbuf_src_dir"/loaders/*.so; do
             [ -f "$loader" ] || continue
             collect_elf_closure "$loader"
             copy_closure_libs
+            cp "$loader" "$LIBDIR/gdk-pixbuf-2.0/loaders/"
           done
           if [ -n "$rsvg_pixbuf_dir" ] && [ -d "$rsvg_pixbuf_dir/loaders" ]; then
             for loader in "$rsvg_pixbuf_dir"/loaders/*.so; do
               [ -f "$loader" ] || continue
               collect_elf_closure "$loader"
               copy_closure_libs
+              cp "$loader" "$LIBDIR/gdk-pixbuf-2.0/loaders/"
             done
           fi
 

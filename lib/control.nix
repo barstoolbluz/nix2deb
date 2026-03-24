@@ -70,13 +70,17 @@ in
         "Installed-Size: @@INSTALLED_SIZE@@"
         "Depends: ${dependsStr}"
       ]
-      ++ (if recommends == [ ] then [ ] else [ "Recommends: ${builtins.concatStringsSep ", " recommends}" ])
+      ++ (
+        if recommends == [ ] then [ ] else [ "Recommends: ${builtins.concatStringsSep ", " recommends}" ]
+      )
       ++ [
         "Maintainer: ${maintainer}"
-        "Description: ${description}"
-        (formatLongDesc longDescription)
       ]
       ++ (if homepage == "" then [ ] else [ "Homepage: ${homepage}" ])
+      ++ [
+        "Description: ${description}"
+      ]
+      ++ (if longDescription == "" then [ ] else [ (formatLongDesc longDescription) ])
     );
 
   defaultPostinst = defaultPostinstScript;

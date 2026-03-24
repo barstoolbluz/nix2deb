@@ -58,6 +58,7 @@
       RESOLVED_BINARY=""
       declare -A _ELF_CLOSURE_VISITED
       declare -a _ELF_CLOSURE_LIBS
+      declare -A _CLOSURE_PKG_DIRS
 
       # --- resolve_binary (#1) ---
       # Determines the real binary path. If realBinary was specified, uses it.
@@ -90,15 +91,29 @@
         echo "==> Resolved binary: $RESOLVED_BINARY"
       }
 
+      _register_pkg_root() {
+        local path="$1"
+        local pkg_root=""
+        case "$path" in
+          /nix/store/*)
+            pkg_root=$(echo "$path" | sed 's|^\(/nix/store/[^/]*\).*|\1|')
+            [ -n "$pkg_root" ] && _CLOSURE_PKG_DIRS["$pkg_root"]=1
+            ;;
+        esac
+      }
+
       # --- collect_elf_closure (#3, #2) ---
       # Deterministic ELF closure walker using patchelf instead of ldd.
       # Resolves DT_NEEDED entries against RPATH dirs.
       # When excludeLibs is empty, no filtering is applied (#2).
       collect_elf_closure() {
         local root_file="$1"
+        local real_root
+        real_root=$(readlink -f "$root_file" 2>/dev/null) || real_root="$root_file"
+        _register_pkg_root "$real_root"
         _ELF_CLOSURE_VISITED=()
         _ELF_CLOSURE_LIBS=()
-        _walk_elf_deps "$root_file"
+        _walk_elf_deps "$real_root"
       }
 
       _walk_elf_deps() {
@@ -185,6 +200,7 @@
           esac
 
           _ELF_CLOSURE_LIBS+=("$found")
+          _register_pkg_root "$found"
           # Recurse into this lib's deps
           _walk_elf_deps "$found"
         done
@@ -272,6 +288,7 @@
         # Collect from extra lib packages
         ${builtins.concatStringsSep "\n" (
           map (pkg: ''
+            _register_pkg_root "${pkg}"
             for so in "${pkg}"/lib/*.so*; do
               if [ -f "$so" ] && ! [ -L "$so" ]; then
                 collect_elf_closure "$so"
@@ -284,6 +301,7 @@
         # Copy extra lib files directly
         ${builtins.concatStringsSep "\n" (
           map (extraLib: ''
+            _register_pkg_root "${extraLib}"
             if [ -f "${extraLib}" ]; then
               local target
               target=$(basename "${extraLib}")
@@ -301,6 +319,7 @@
         # Copy .so files and symlinks from extra packages
         ${builtins.concatStringsSep "\n" (
           map (pkg: ''
+            _register_pkg_root "${pkg}"
             for so in "${pkg}"/lib/*.so*; do
               if [ -f "$so" ] && ! [ -L "$so" ]; then
                 local target
@@ -350,6 +369,14 @@
           echo "  FIX: replacing DT_NEEDED $abs_lib -> $soname"
           patchelf --replace-needed "$abs_lib" "$soname" "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true
         done
+        # Record the Qt major used by the main binary so the wrapper can
+        # select a single plugin tree and avoid mixing Qt 5/6 plugins.
+        if patchelf --print-needed "$PKG/usr/bin/.${binName}-bin" 2>/dev/null | grep -q '^libQt6Core\.so'; then
+          echo 6 > "$LIBDIR/.qt-major"
+        elif patchelf --print-needed "$PKG/usr/bin/.${binName}-bin" 2>/dev/null | grep -q '^libQt5Core\.so'; then
+          echo 5 > "$LIBDIR/.qt-major"
+        fi
+
         # Strip all nix store references from the binary
         remove-references-to -t ${pkgs.stdenv.cc} "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true
         remove-references-to -t ${package} "$PKG/usr/bin/.${binName}-bin" 2>/dev/null || true

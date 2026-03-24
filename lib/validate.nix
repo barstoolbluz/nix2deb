@@ -43,8 +43,16 @@
       throw "nix-to-deb: extraShareCopies dst must not be empty"
     else if builtins.match "^/" dst != null then
       throw "nix-to-deb: extraShareCopies dst '${dst}' must be relative (no leading '/')"
-    else if builtins.match ".*\\.\\." dst != null then
+    else if builtins.match "(|.*/)\\.\\.(/.*|)" dst != null then
       throw "nix-to-deb: extraShareCopies dst '${dst}' must not contain '..'"
+    else
+      true;
+
+  # binName must be a valid filename: starts with alphanumeric, rest [a-zA-Z0-9._+-]
+  validateBinName =
+    binName:
+    if builtins.match "[a-zA-Z0-9][a-zA-Z0-9._+\\-]*" binName == null then
+      throw "nix-to-deb: invalid binName '${binName}'. Must start with alphanumeric and contain only [a-zA-Z0-9._+-]."
     else
       true;
 }

@@ -34,6 +34,8 @@
   extraLibs ? [ ], # Additional .so files to bundle
   extraLibPackages ? [ ], # Additional packages whose .so files and deps should be bundled
   createCompatSymlinks ? false, # Opt-in synthetic .so symlinks
+  discoverModules ? false, # Auto-discover dlopen() modules from closure packages
+  discoverModuleCategories ? null, # null = all, or a whitelist like [ "qt6" "gstreamer" ]
   allowedSystemLibs ? [
     # Libs allowed to be unresolved (system-provided)
     "libm.so"
@@ -93,6 +95,7 @@ let
   control = import ./lib/control.nix { inherit lib; };
   wrapper = import ./lib/wrapper.nix { inherit lib; };
   gtkHelpers = import ./lib/gtk.nix { inherit lib pkgs; };
+  discoverHelpers = import ./lib/discover.nix { inherit lib pkgs; };
   shellHelpers = import ./lib/shell-helpers.nix { inherit lib pkgs; };
 
   # --- Resolve target profile (issue #10) ---
@@ -147,6 +150,7 @@ let
       binName
       bundlePath
       gtkSupport
+      discoverModules
       pname
       extraWrapperEnv
       ;
@@ -190,6 +194,17 @@ let
       fixSystemdServices
       ;
   };
+
+  discoverCode = lib.optionalString discoverModules (
+    discoverHelpers.mkDiscoverShellCode {
+      inherit
+        pname
+        bundlePath
+        gtkSupport
+        discoverModuleCategories
+        ;
+    }
+  );
 
   verifyCode = shellHelpers.mkVerifyCode {
     inherit pname bundlePath allowedSystemLibs;
@@ -244,6 +259,10 @@ pkgs.stdenv.mkDerivation {
   ++ lib.optionals gtkSupport [
     pkgs.gdk-pixbuf
     pkgs.glib.dev
+  ]
+  ++ lib.optionals (discoverModules && !gtkSupport) [
+    pkgs.gdk-pixbuf
+    pkgs.glib.dev
   ];
 
   installPhase = ''
@@ -271,6 +290,11 @@ pkgs.stdenv.mkDerivation {
         ${shareCode}
 
         # =================================================================
+        # dlopen() module discovery functions
+        # =================================================================
+        ${discoverCode}
+
+        # =================================================================
         # GTK support functions
         # =================================================================
         ${gtkCode}
@@ -286,12 +310,14 @@ pkgs.stdenv.mkDerivation {
         ${manifestCode}
 
         # =================================================================
-        # Pipeline: resolve → copy → [gtk] → install → wrapper → share →
-        #           control → scripts → manifest → verify → dpkg-deb
+        # Pipeline: resolve → copy → [discover] → [gtk] → install →
+        #           wrapper → share → control → scripts → manifest →
+        #           verify → dpkg-deb
         # =================================================================
 
         resolve_binary
         copy_private_libs
+        ${lib.optionalString discoverModules "discover_dlopen_modules"}
         ${lib.optionalString gtkSupport "copy_gtk_runtime"}
         install_binary
 
