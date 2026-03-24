@@ -78,6 +78,46 @@ nixToDeb {
 };
 ```
 
+## Module Discovery
+
+For applications that `dlopen()` plugins at runtime (GIO modules, Qt plugins,
+GStreamer, etc.), enable `discoverModules = true` to automatically scan the ELF
+dependency closure for known module patterns and bundle them:
+
+```nix
+nixToDeb {
+  inherit pkgs;
+  package = pkgs.my-qt-app;
+  discoverModules = true;
+  extraLibPackages = [ pkgs.qt6.qtsvg pkgs.qt6.qtwayland ];
+  description = "My Qt application";
+};
+```
+
+Discovered module categories:
+
+- **GIO modules** (`lib/gio/modules/*.so`) — dconf, etc.
+- **GDK pixbuf loaders** (`lib/gdk-pixbuf-2.0/*/loaders/*.so`) — with `loaders.cache` generation
+- **Qt plugins** (`lib/qt-*/plugins/*/*.so`) — Qt 5 and Qt 6
+- **GStreamer plugins** (`lib/gstreamer-1.0/*.so`)
+- **GObject typelibs** (`lib/girepository-1.0/*.typelib`)
+- **GSettings schemas** (`share/gsettings-schemas/*/glib-2.0/schemas/*.xml`) — with compilation
+
+The wrapper script sets the corresponding env vars (`QT_PLUGIN_PATH`,
+`GST_PLUGIN_PATH`, etc.) conditionally at runtime — only when the directory
+actually exists in the installed `.deb`.
+
+**Scope**: Only packages already in the ELF dependency closure are scanned. Plugin
+packages that aren't linked (e.g., `qt6.qtsvg`) must be added via `extraLibPackages`
+to be discovered. When both `discoverModules` and `gtkSupport` are enabled,
+`gtkSupport` takes precedence for GIO/pixbuf/schema/typelib categories.
+
+Use `discoverModuleCategories` to whitelist specific categories:
+
+```nix
+discoverModuleCategories = [ "qt" "gstreamer" ];  # only discover Qt and GStreamer
+```
+
 ## Full API Reference
 
 ### Required
@@ -112,6 +152,8 @@ nixToDeb {
 | `excludeLibs` | `[ "glibc" ]` | Grep patterns for libs to exclude |
 | `extraLibs` | `[]` | Additional `.so` files to bundle |
 | `extraLibPackages` | `[]` | Packages whose `.so` files and deps to bundle |
+| `discoverModules` | `false` | Auto-discover `dlopen()`'d modules from ELF closure |
+| `discoverModuleCategories` | `null` | Whitelist categories (`null` = all, or `[ "gio" "qt" "gstreamer" ... ]`) |
 
 ### GTK Support
 
@@ -173,6 +215,7 @@ that nix's newer glibc has removed.
   `systemLibDir` for other architectures
 - **~40MB overhead** — bundling ~250 shared libraries adds size
 - **glibc floor** — host must have glibc >= what the nix-built libs require
-- **dlopen'd modules need manual discovery** — static ELF dependency walking
-  doesn't see GIO modules, pixbuf loaders, Qt plugins, etc. Use `gtkSupport`
-  for GTK apps or `extraLibPackages` for others
+- **dlopen'd modules from unlinked packages** — `discoverModules` scans packages
+  already in the ELF closure, but plugin packages that aren't linked (e.g.,
+  `qt6.qtsvg`) must be added via `extraLibPackages`. For Qt5 specifically,
+  plugins live in the `-bin` output (e.g., `pkgs.qt5.qtbase.bin`)
