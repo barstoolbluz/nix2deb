@@ -12,7 +12,7 @@ Add as a flake input:
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    nix2deb.url = "github:youruser/nix2deb";
+    nix2deb.url = "github:barstoolbluz/nix2deb";
   };
 
   outputs = { nixpkgs, nix2deb, ... }:
@@ -33,7 +33,15 @@ Add as a flake input:
 
 ```bash
 nix build .
+# Output: result/<pname>_<version>_<arch>.deb
 sudo dpkg -i result/ripgrep_*_amd64.deb
+```
+
+Try the included example without cloning:
+
+```bash
+nix build github:barstoolbluz/nix2deb#example-simple
+ls result/  # hello-nix_2.12.2_amd64.deb
 ```
 
 ## How It Works
@@ -77,6 +85,15 @@ nixToDeb {
   shareFiles = [ "applications" "icons" "man" "locale" ];
 };
 ```
+
+## Choosing a Strategy
+
+| App type | What to set |
+|----------|-------------|
+| Simple CLI tool (e.g., ripgrep) | Defaults are enough |
+| GTK app | `gtkSupport = true` (handles schemas, loaders.cache, schema compilation) |
+| Qt / GStreamer / other plugin framework | `discoverModules = true` + `extraLibPackages` for unlinked plugin packages |
+| GTK app that also uses GStreamer | Both — `gtkSupport` handles GTK categories, `discoverModules` handles the rest |
 
 ## Module Discovery
 
@@ -144,6 +161,7 @@ discoverModuleCategories = [ "qt6" "gstreamer" ];  # only discover Qt 6 and GStr
 | `interpreter` | `"/lib64/ld-linux-x86-64.so.2"` | System dynamic linker path |
 | `systemLibDir` | `"/usr/lib/x86_64-linux-gnu"` | System library directory |
 | `bundleLibDir` | `"/usr/lib/${pname}"` | Where bundled libs install to |
+| `targetProfile` | `{}` | Override resolved platform profile (debArch, interpreter, systemLibDir) |
 
 ### Library Bundling
 
@@ -152,6 +170,8 @@ discoverModuleCategories = [ "qt6" "gstreamer" ];  # only discover Qt 6 and GStr
 | `excludeLibs` | `[ "glibc" ]` | Grep patterns for libs to exclude |
 | `extraLibs` | `[]` | Additional `.so` files to bundle |
 | `extraLibPackages` | `[]` | Packages whose `.so` files and deps to bundle |
+| `createCompatSymlinks` | `false` | Create `libfoo.so` → `libfoo.so.x.y` compat symlinks |
+| `allowedSystemLibs` | glibc, libm, etc. | Library prefixes allowed to be unresolved (system-provided) |
 | `discoverModules` | `false` | Auto-discover `dlopen()`'d modules from ELF closure |
 | `discoverModuleCategories` | `null` | Whitelist categories (`null` = all, or `[ "gio" "pixbuf" "qt5" "qt6" "gstreamer" "typelibs" "schemas" ]`) |
 
@@ -211,11 +231,28 @@ that nix's newer glibc has removed.
 
 ## Limitations
 
-- **x86_64 only by default** — override `debArch`, `interpreter`, and
-  `systemLibDir` for other architectures
+- **x86_64 and aarch64 Linux auto-detected** — other architectures require
+  manual `targetProfile` or `debArch`/`interpreter`/`systemLibDir` overrides
 - **~40MB overhead** — bundling ~250 shared libraries adds size
 - **glibc floor** — host must have glibc >= what the nix-built libs require
 - **dlopen'd modules from unlinked packages** — `discoverModules` scans packages
   already in the ELF closure, but plugin packages that aren't linked (e.g.,
   `qt6.qtsvg`) must be added via `extraLibPackages`. For Qt5 specifically,
   plugins live in the `-bin` output (e.g., `pkgs.qt5.qtbase.bin`)
+
+## Troubleshooting
+
+**"unresolved DT_NEEDED entries found"** — A bundled library needs another
+library that wasn't bundled. If the library should come from the host system
+(e.g., GPU drivers), add its prefix to `allowedSystemLibs`. If it should be
+bundled, add the providing package to `extraLibPackages`.
+
+**"/nix/store references"** — A staged file still contains a nix store path.
+For data files, check that the relevant fixup is enabled (`fixDesktopFiles`,
+`fixDbusServices`, `fixSystemdServices`). For binaries or libraries, this
+usually indicates a `remove-references-to` gap — file an issue.
+
+**App installs but crashes with missing plugin/module** — The plugin's `.so`
+files weren't bundled because the plugin package isn't in the ELF dependency
+closure. Add it to `extraLibPackages` and enable `discoverModules = true` so
+the plugin directory is scanned and bundled.
