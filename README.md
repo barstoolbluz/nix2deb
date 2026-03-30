@@ -61,7 +61,12 @@ ls result/  # hello-nix_2.12.2_amd64.deb
 4. **Wrapper script** — A shell wrapper at `/usr/bin/<name>` sets any required
    environment variables and exec's the patched binary.
 
-5. **Package** — `dpkg-deb` builds the `.deb` with proper control file,
+5. **Compute glibc floor** — Scans all staged ELF files with `readelf` for
+   `GLIBC_*` version tags and picks the maximum. The resulting minimum glibc
+   version (e.g., `libc6 (>= 2.34)`) is injected into the `Depends:` field
+   automatically — no hardcoded version.
+
+6. **Package** — `dpkg-deb` builds the `.deb` with proper control file,
    postinst/postrm scripts, and root ownership.
 
 ## GTK Applications
@@ -207,7 +212,7 @@ discoverModuleCategories = [ "qt6" "gstreamer" ];  # only discover Qt 6 and GStr
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `depends` | `[ "libc6 (>= 2.38)" ]` | Package dependencies |
+| `depends` | auto-computed | Package dependencies; override with explicit list to skip glibc auto-detection |
 | `recommends` | `[]` | Recommended packages |
 | `section` | `"utils"` | Debian section |
 | `homepage` | `""` | Homepage URL |
@@ -216,6 +221,29 @@ discoverModuleCategories = [ "qt6" "gstreamer" ];  # only discover Qt 6 and GStr
 | `longDescription` | auto | Long description |
 | `postinst` | desktop/icon cache update | Custom postinst script |
 | `postrm` | desktop/icon cache cleanup | Custom postrm script |
+
+## Build Manifest
+
+Each `.deb` includes a JSON manifest at
+`/usr/share/doc/<pname>/build-manifest.json` with provenance metadata:
+
+```json
+{
+  "pname": "hello-nix",
+  "version": "2.12.2",
+  "architecture": "amd64",
+  "resolved_binary": "/nix/store/...-hello-2.12.2/bin/hello",
+  "bundled_libs": {
+    "libfoo.so.1": "/nix/store/...-foo-1.2/lib/libfoo.so.1",
+    "libbar.so.2": "/nix/store/...-bar-3.4/lib/libbar.so.2"
+  },
+  "glibc_floor": "2.34",
+  "built_by": "nix-to-deb"
+}
+```
+
+`bundled_libs` maps each bundled library basename to its source nix store path,
+making it easy to trace which nixpkgs package provided each `.so`.
 
 ## Why Bundle Instead of Using System Libraries?
 
@@ -234,7 +262,9 @@ that nix's newer glibc has removed.
 - **x86_64 and aarch64 Linux auto-detected** — other architectures require
   manual `targetProfile` or `debArch`/`interpreter`/`systemLibDir` overrides
 - **~40MB overhead** — bundling ~250 shared libraries adds size
-- **glibc floor** — host must have glibc >= what the nix-built libs require
+- **glibc floor** — the `Depends:` line is auto-computed from `GLIBC_*` version
+  tags in the staged ELF payload; host must have at least that version. If no
+  tags are found (unlikely), falls back to a per-architecture baseline (2.38)
 - **dlopen'd modules from unlinked packages** — `discoverModules` scans packages
   already in the ELF closure, but plugin packages that aren't linked (e.g.,
   `qt6.qtsvg`) must be added via `extraLibPackages`. For Qt5 specifically,

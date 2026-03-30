@@ -10,13 +10,15 @@ let
       debArch = "amd64";
       systemLibDir = "/usr/lib/x86_64-linux-gnu";
       interpreter = "/lib64/ld-linux-x86-64.so.2";
-      defaultDepends = [ "libc6 (>= 2.38)" ];
+      defaultDepends = [ ];
+      glibcBaseline = "2.38";
     };
     "aarch64-linux" = {
       debArch = "arm64";
       systemLibDir = "/usr/lib/aarch64-linux-gnu";
       interpreter = "/lib/ld-linux-aarch64.so.1";
-      defaultDepends = [ "libc6 (>= 2.38)" ];
+      defaultDepends = [ ];
+      glibcBaseline = "2.38";
     };
   };
 

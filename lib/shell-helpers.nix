@@ -26,6 +26,7 @@
       extraLibs ? [ ],
       extraLibPackages ? [ ],
       createCompatSymlinks ? false,
+      targetGlibcBaseline ? null,
       allowedSystemLibs ? [
         "libm.so"
         "libc.so"
@@ -59,6 +60,11 @@
       declare -A _ELF_CLOSURE_VISITED
       declare -a _ELF_CLOSURE_LIBS
       declare -A _CLOSURE_PKG_DIRS
+      declare -A _BUNDLED_LIB_SOURCES
+      COMPUTED_GLIBC_FLOOR=""
+      COMPUTED_GLIBC_MAX_TAG=""
+      COMPUTED_GLIBC_SOURCE=""
+      TARGET_GLIBC_BASELINE="${if targetGlibcBaseline != null then targetGlibcBaseline else ""}"
 
       # --- resolve_binary (#1) ---
       # Determines the real binary path. If realBinary was specified, uses it.
@@ -100,6 +106,76 @@
             [ -n "$pkg_root" ] && _CLOSURE_PKG_DIRS["$pkg_root"]=1
             ;;
         esac
+      }
+
+      _record_bundled_lib_source() {
+        local bundled_name="$1"
+        local source_path="$2"
+        [ -n "$bundled_name" ] || return 0
+        [ -n "$source_path" ] || return 0
+        if [ -z "''${_BUNDLED_LIB_SOURCES[$bundled_name]+x}" ]; then
+          _BUNDLED_LIB_SOURCES["$bundled_name"]="$source_path"
+        fi
+      }
+
+      _record_bundled_lib_alias() {
+        local alias_name="$1"
+        local target_name="$2"
+        [ -n "$alias_name" ] || return 0
+        [ -n "$target_name" ] || return 0
+        if [ -z "''${_BUNDLED_LIB_SOURCES[$alias_name]+x}" ] && [ -n "''${_BUNDLED_LIB_SOURCES[$target_name]+x}" ]; then
+          _BUNDLED_LIB_SOURCES["$alias_name"]="''${_BUNDLED_LIB_SOURCES[$target_name]}"
+        fi
+      }
+
+      _version_gt() {
+        local lhs="$1" rhs="$2"
+        [ "$lhs" != "$rhs" ] && [ "$(printf '%s\n%s\n' "$lhs" "$rhs" | sort -V | tail -n1)" = "$lhs" ]
+      }
+
+      compute_glibc_floor() {
+        echo "==> Computing GLIBC floor from staged ELF payload..."
+        COMPUTED_GLIBC_FLOOR=""
+        COMPUTED_GLIBC_MAX_TAG=""
+        COMPUTED_GLIBC_SOURCE=""
+
+        while IFS= read -r -d "" staged_file; do
+          if ! file -b "$staged_file" | grep -q "ELF"; then
+            continue
+          fi
+
+          local file_max_tag=""
+          file_max_tag=$(readelf --version-info "$staged_file" 2>/dev/null \
+            | grep -o 'GLIBC_[0-9][0-9.]*' \
+            | sort -uV \
+            | tail -n1) || true
+
+          if [ -z "$file_max_tag" ]; then
+            continue
+          fi
+
+          if [ -z "$COMPUTED_GLIBC_MAX_TAG" ] || _version_gt "''${file_max_tag#GLIBC_}" "''${COMPUTED_GLIBC_MAX_TAG#GLIBC_}"; then
+            COMPUTED_GLIBC_MAX_TAG="$file_max_tag"
+            COMPUTED_GLIBC_FLOOR="''${file_max_tag#GLIBC_}"
+            COMPUTED_GLIBC_SOURCE="$staged_file"
+          fi
+        done < <(find "$PKG" -type f -print0)
+
+        if [ -z "$COMPUTED_GLIBC_FLOOR" ] && [ -n "$TARGET_GLIBC_BASELINE" ]; then
+          COMPUTED_GLIBC_FLOOR="$TARGET_GLIBC_BASELINE"
+          echo "  WARN: no GLIBC_* tags found in staged ELF payload; falling back to target baseline $TARGET_GLIBC_BASELINE" >&2
+        fi
+
+        if [ -n "$COMPUTED_GLIBC_FLOOR" ]; then
+          echo "==> GLIBC floor: libc6 (>= $COMPUTED_GLIBC_FLOOR)"
+        fi
+
+        if [ -n "$TARGET_GLIBC_BASELINE" ] && [ -n "$COMPUTED_GLIBC_FLOOR" ] && _version_gt "$COMPUTED_GLIBC_FLOOR" "$TARGET_GLIBC_BASELINE"; then
+          echo "  WARN: computed GLIBC floor $COMPUTED_GLIBC_FLOOR exceeds target baseline $TARGET_GLIBC_BASELINE" >&2
+          if [ -n "$COMPUTED_GLIBC_SOURCE" ]; then
+            echo "    Highest requirement seen in: $COMPUTED_GLIBC_SOURCE ($COMPUTED_GLIBC_MAX_TAG)" >&2
+          fi
+        fi
       }
 
       # --- collect_elf_closure (#3, #2) ---
@@ -220,10 +296,12 @@
       # Helper: safe copy with collision detection (#7)
       _copy_lib_safe() {
         local src="$1" dst="$2"
+        local dst_name
+        dst_name=$(basename "$dst")
         if [ -e "$dst" ] || [ -L "$dst" ]; then
           # Already exists — check for collision
           if [ -f "$dst" ] && [ -f "$src" ] && ! cmp -s "$(readlink -f "$src")" "$(readlink -f "$dst")"; then
-            echo "  WARN: library collision for $(basename "$dst"), keeping first copy" >&2
+            echo "  WARN: library collision for $dst_name, keeping first copy" >&2
             echo "    Existing: $(readlink -f "$dst")" >&2
             echo "    Skipping: $src" >&2
           fi
@@ -233,21 +311,17 @@
 
         # Preserve symlink chains (#8): copy the real file first, then the symlink
         if [ -L "$src" ]; then
-          local link_target real_file
+          local link_target real_file target_basename dst_dir
           link_target=$(readlink "$src")
           real_file=$(readlink -f "$src")
-          local target_basename
           target_basename=$(basename "$link_target")
-          local dst_dir
           dst_dir=$(dirname "$dst")
-          # Copy the real file if not already present
-          if [ ! -e "$dst_dir/$target_basename" ]; then
-            cp "$real_file" "$dst_dir/$target_basename"
-          fi
-          # Create the symlink
+          _copy_lib_safe "$real_file" "$dst_dir/$target_basename"
           ln -sf "$target_basename" "$dst"
+          _record_bundled_lib_source "$dst_name" "$src"
         else
           cp "$src" "$dst"
+          _record_bundled_lib_source "$dst_name" "$src"
         fi
       }
 
@@ -302,16 +376,10 @@
         ${builtins.concatStringsSep "\n" (
           map (extraLib: ''
             _register_pkg_root "${extraLib}"
-            if [ -f "${extraLib}" ]; then
+            if [ -f "${extraLib}" ] || [ -L "${extraLib}" ]; then
               local target
               target=$(basename "${extraLib}")
               _copy_lib_safe "${extraLib}" "$LIBDIR/$target"
-            elif [ -L "${extraLib}" ]; then
-              local linkto target
-              linkto=$(basename "$(readlink "${extraLib}")")
-              target=$(basename "${extraLib}")
-              [ "$linkto" != "$target" ] && [ ! -e "$LIBDIR/$target" ] && \
-                ln -sf "$linkto" "$LIBDIR/$target"
             fi
           '') extraLibs
         )}
@@ -321,16 +389,10 @@
           map (pkg: ''
             _register_pkg_root "${pkg}"
             for so in "${pkg}"/lib/*.so*; do
-              if [ -f "$so" ] && ! [ -L "$so" ]; then
+              if [ -f "$so" ] || [ -L "$so" ]; then
                 local target
                 target=$(basename "$so")
                 _copy_lib_safe "$so" "$LIBDIR/$target"
-              elif [ -L "$so" ]; then
-                local linkto target
-                linkto=$(basename "$(readlink "$so")")
-                target=$(basename "$so")
-                [ "$linkto" != "$target" ] && [ ! -e "$LIBDIR/$target" ] && \
-                  ln -sf "$linkto" "$LIBDIR/$target"
               fi
             done
           '') extraLibPackages
@@ -343,7 +405,10 @@
             local base soname
             base=$(basename "$lib_file")
             soname=$(echo "$base" | sed 's/\.so\..*/\.so/')
-            [ ! -e "$LIBDIR/$soname" ] && ln -sf "$base" "$LIBDIR/$soname"
+            if [ ! -e "$LIBDIR/$soname" ]; then
+              ln -sf "$base" "$LIBDIR/$soname"
+              _record_bundled_lib_alias "$soname" "$base"
+            fi
           done
         ''}
 
@@ -401,6 +466,13 @@
       ${controlFileTemplate}
       CONTROL_TEMPLATE_EOF
               sed -i "s/@@INSTALLED_SIZE@@/$installed_size/" "$PKG/DEBIAN/control"
+              if grep -q '@@NIX_TO_DEB_DEPENDS@@' "$PKG/DEBIAN/control"; then
+                if [ -z "$COMPUTED_GLIBC_FLOOR" ]; then
+                  echo "ERROR: GLIBC floor was not computed before control file generation" >&2
+                  exit 1
+                fi
+                sed -i "s#@@NIX_TO_DEB_DEPENDS@@#libc6 (>= $COMPUTED_GLIBC_FLOOR)#" "$PKG/DEBIAN/control"
+              fi
               echo "==> Control file written."
             }
     '';
@@ -579,27 +651,46 @@
       write_build_manifest() {
         echo "==> Writing build manifest..."
         local manifest_dir="$PKG/usr/share/doc/${pname}"
+        local manifest_path="$manifest_dir/build-manifest.json"
+        local bundled_libs_json="{}"
         mkdir -p "$manifest_dir"
 
-        local bundled_libs
-        bundled_libs=$(cd "$LIBDIR" 2>/dev/null && ls *.so* 2>/dev/null | jq -R -s 'split("\n") | map(select(. != ""))') || bundled_libs="[]"
+        if [ ''${#_BUNDLED_LIB_SOURCES[@]} -gt 0 ]; then
+          bundled_libs_json=$(
+            while IFS= read -r bundled_name; do
+              jq -cn \
+                --arg key "$bundled_name" \
+                --arg value "''${_BUNDLED_LIB_SOURCES[$bundled_name]}" \
+                '{ key: $key, value: $value }'
+            done < <(printf '%s\n' "''${!_BUNDLED_LIB_SOURCES[@]}" | LC_ALL=C sort) | jq -s 'from_entries'
+          )
+        fi
 
         jq -n \
           --arg pname "${pname}" \
           --arg version "${version}" \
           --arg arch "${debArch}" \
           --arg binary "$RESOLVED_BINARY" \
-          --argjson libs "$bundled_libs" \
+          --arg glibc_floor "$COMPUTED_GLIBC_FLOOR" \
+          --argjson libs "$bundled_libs_json" \
           '{
             pname: $pname,
             version: $version,
             architecture: $arch,
             resolved_binary: $binary,
             bundled_libs: $libs,
+            glibc_floor: (if $glibc_floor == "" then null else $glibc_floor end),
             built_by: "nix-to-deb"
-          }' > "$manifest_dir/build-manifest.json"
+          }' > "$manifest_path"
+
+        jq -e '
+          (.bundled_libs | type) == "object"
+          and ([.bundled_libs[]? | (type == "string")] | index(false) == null)
+          and (.glibc_floor == null or (.glibc_floor | type) == "string")
+        ' "$manifest_path" >/dev/null
 
         echo "==> Build manifest written."
       }
     '';
+
 }

@@ -110,7 +110,9 @@ let
   resolvedDebArch = resolvedProfile.debArch;
   resolvedInterpreter = resolvedProfile.interpreter;
   resolvedSystemLibDir = resolvedProfile.systemLibDir;
-  resolvedDepends = if depends != null then depends else resolvedProfile.defaultDepends;
+  resolvedGlibcBaseline = resolvedProfile.glibcBaseline or null;
+  resolvedDepends =
+    if depends != null then depends else [ "@@NIX_TO_DEB_DEPENDS@@" ] ++ resolvedProfile.defaultDepends;
 
   bundlePath = if bundleLibDir != null then bundleLibDir else "/usr/lib/${pname}";
 
@@ -177,6 +179,7 @@ let
       ;
     systemLibDir = resolvedSystemLibDir;
     interpreter = resolvedInterpreter;
+    targetGlibcBaseline = resolvedGlibcBaseline;
   };
 
   controlInstallCode = shellHelpers.mkControlInstallCode {
@@ -255,6 +258,7 @@ pkgs.stdenv.mkDerivation {
     pkgs.removeReferencesTo
     pkgs.jq
     pkgs.file
+    pkgs.binutils
   ]
   ++ lib.optionals gtkSupport [
     pkgs.gdk-pixbuf
@@ -328,6 +332,7 @@ pkgs.stdenv.mkDerivation {
         chmod +x $PKG/usr/bin/${binName}
 
         copy_share_tree
+        compute_glibc_floor
         install_control_file
 
         # Write maintainer scripts
